@@ -29,7 +29,10 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct {
+	HAL_StatusTypeDef halStatus;
+	int16_t value;
+} queueItem_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -44,6 +47,8 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim2;
+
 UART_HandleTypeDef huart1;
 
 /* Definitions for ReadTemp */
@@ -53,13 +58,16 @@ const osThreadAttr_t ReadTemp_attributes = { .name = "ReadTemp", .priority =
 /* Definitions for WriteTemp */
 osThreadId_t WriteTempHandle;
 const osThreadAttr_t WriteTemp_attributes = { .name = "WriteTemp", .priority =
-		(osPriority_t) osPriorityLow, .stack_size = 128 * 4 };
+		(osPriority_t) osPriorityBelowNormal7, .stack_size = 128 * 4 };
+/* Definitions for myQueue01 */
+osMessageQueueId_t myQueue01Handle;
+const osMessageQueueAttr_t myQueue01_attributes = { .name = "myQueue01" };
+/* Definitions for myBinarySem01 */
+osSemaphoreId_t myBinarySem01Handle;
+const osSemaphoreAttr_t myBinarySem01_attributes = { .name = "myBinarySem01" };
 /* USER CODE BEGIN PV */
 static const uint8_t TMP102_I2C_ADDR = 0x48 << 1;
 static const uint8_t TMP102_REG_ADDR = 0x00;
-
-volatile uint8_t writeFlag = 0;
-uint8_t buf[BUFSIZ];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,6 +75,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM2_Init(void);
 void readTempTask(void *argument);
 void writeTempTask(void *argument);
 
@@ -108,8 +117,9 @@ int main(void) {
 	MX_GPIO_Init();
 	MX_I2C1_Init();
 	MX_USART1_UART_Init();
+	MX_TIM2_Init();
 	/* USER CODE BEGIN 2 */
-
+	HAL_TIM_Base_Start_IT(&htim2);
 	/* USER CODE END 2 */
 
 	/* Init scheduler */
@@ -119,6 +129,10 @@ int main(void) {
 	/* add mutexes, ... */
 	/* USER CODE END RTOS_MUTEX */
 
+	/* Create the semaphores(s) */
+	/* creation of myBinarySem01 */
+	myBinarySem01Handle = osSemaphoreNew(1, 1, &myBinarySem01_attributes);
+
 	/* USER CODE BEGIN RTOS_SEMAPHORES */
 	/* add semaphores, ... */
 	/* USER CODE END RTOS_SEMAPHORES */
@@ -126,6 +140,11 @@ int main(void) {
 	/* USER CODE BEGIN RTOS_TIMERS */
 	/* start timers, add new ones, ... */
 	/* USER CODE END RTOS_TIMERS */
+
+	/* Create the queue(s) */
+	/* creation of myQueue01 */
+	myQueue01Handle = osMessageQueueNew(16, sizeof(queueItem_t),
+			&myQueue01_attributes);
 
 	/* USER CODE BEGIN RTOS_QUEUES */
 	/* add queues, ... */
@@ -225,6 +244,48 @@ static void MX_I2C1_Init(void) {
 }
 
 /**
+ * @brief TIM2 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM2_Init(void) {
+
+	/* USER CODE BEGIN TIM2_Init 0 */
+
+	/* USER CODE END TIM2_Init 0 */
+
+	TIM_ClockConfigTypeDef sClockSourceConfig = { 0 };
+	TIM_MasterConfigTypeDef sMasterConfig = { 0 };
+
+	/* USER CODE BEGIN TIM2_Init 1 */
+
+	/* USER CODE END TIM2_Init 1 */
+	htim2.Instance = TIM2;
+	htim2.Init.Prescaler = 8000 - 1;
+	htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim2.Init.Period = 100 - 1;
+	htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	if (HAL_TIM_Base_Init(&htim2) != HAL_OK) {
+		Error_Handler();
+	}
+	sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+	if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK) {
+		Error_Handler();
+	}
+	sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+	sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+	if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig)
+			!= HAL_OK) {
+		Error_Handler();
+	}
+	/* USER CODE BEGIN TIM2_Init 2 */
+
+	/* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
  * @brief USART1 Initialization Function
  * @param None
  * @retval None
@@ -261,10 +322,22 @@ static void MX_USART1_UART_Init(void) {
  * @retval None
  */
 static void MX_GPIO_Init(void) {
+	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
 
 	/* GPIO Ports Clock Enable */
+	__HAL_RCC_GPIOC_CLK_ENABLE();
 	__HAL_RCC_GPIOA_CLK_ENABLE();
 	__HAL_RCC_GPIOB_CLK_ENABLE();
+
+	/*Configure GPIO pin Output Level */
+	HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+
+	/*Configure GPIO pin : PC13 */
+	GPIO_InitStruct.Pin = GPIO_PIN_13;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
 }
 
@@ -281,37 +354,34 @@ static void MX_GPIO_Init(void) {
 /* USER CODE END Header_readTempTask */
 void readTempTask(void *argument) {
 	/* USER CODE BEGIN 5 */
-	HAL_StatusTypeDef result;
-	int16_t originalValue;
-	int16_t value;
+	queueItem_t item;
+	uint8_t buf[2];
 
 	/* Infinite loop */
 	for (;;) {
+		osSemaphoreAcquire(myBinarySem01Handle, osWaitForever);
+
 		buf[0] = TMP102_REG_ADDR;
-		result = HAL_I2C_Master_Transmit(&hi2c1, TMP102_I2C_ADDR, buf, 1, HAL_MAX_DELAY);
+		item.halStatus = HAL_I2C_Master_Transmit(&hi2c1, TMP102_I2C_ADDR, buf,
+				1, HAL_MAX_DELAY);
 
-		if (result == HAL_OK) {
-			result = HAL_I2C_Master_Receive(&hi2c1, TMP102_I2C_ADDR, buf, 2, HAL_MAX_DELAY);
+		if (item.halStatus == HAL_OK) {
+			item.halStatus = HAL_I2C_Master_Receive(&hi2c1, TMP102_I2C_ADDR,
+					buf, 2, HAL_MAX_DELAY);
 
-			if (result == HAL_OK) {
-				originalValue = value = ((int16_t) buf[0] << 4) | (buf[1] >> 4);
+			if (item.halStatus == HAL_OK) {
+				item.value = ((int16_t) buf[0] << 4) | (buf[1] >> 4);
 
-				if (value > 0x7FF) {
-					value |= 0xF000;
+				if (item.value > 0x7FF) {
+					item.value |= 0xF000;
 				}
 
-				sprintf((char *) buf, "originalValue = %u; calculated value = %u.%02u degC\r\n", originalValue, value >> 4, ((value * 100) >> 4) % 100);
-			} else {
-				strcpy((char *) buf, "Error Receiving\r\n");
+				osMessageQueuePut(myQueue01Handle, (void*) &item, 0, 0);
 			}
-		} else {
-			strcpy((char *) buf, "Error Transmitting\r\n");
 		}
-
-		writeFlag = 1;
-
-		osDelay(500);
 	}
+
+	osThreadTerminate(NULL);
 	/* USER CODE END 5 */
 }
 
@@ -324,14 +394,21 @@ void readTempTask(void *argument) {
 /* USER CODE END Header_writeTempTask */
 void writeTempTask(void *argument) {
 	/* USER CODE BEGIN writeTempTask */
+	queueItem_t item;
+	uint8_t localBuf[16];
+
 	/* Infinite loop */
 	for (;;) {
-		if (writeFlag) {
-			HAL_UART_Transmit(&huart1, buf, strlen((char *) buf), HAL_MAX_DELAY);
+		osMessageQueueGet(myQueue01Handle, (void*) &item, NULL, osWaitForever);
 
-			writeFlag = 0;
-		}
+		sprintf((char*) localBuf, "%u.%02u degC\r\n", item.value >> 4,
+				((item.value * 100) >> 4) % 100);
+
+		HAL_UART_Transmit(&huart1, localBuf, strlen((char*) localBuf),
+		HAL_MAX_DELAY);
 	}
+
+	osThreadTerminate(NULL);
 	/* USER CODE END writeTempTask */
 }
 
@@ -345,7 +422,11 @@ void writeTempTask(void *argument) {
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	/* USER CODE BEGIN Callback 0 */
+	if (htim == &htim2) {
+		osSemaphoreRelease(myBinarySem01Handle);
 
+		HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+	}
 	/* USER CODE END Callback 0 */
 	if (htim->Instance == TIM3) {
 		HAL_IncTick();
